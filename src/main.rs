@@ -9,7 +9,23 @@ fn memory_map(file: &str) -> anyhow::Result<memmap2::Mmap> {
 
 fn split_map(file: &Mmap, count: usize) -> Vec<&[u8]> {
     let len = file.len();
-    file.chunks(len / count).collect()
+    let boundaries = (1..count).map(|i| {
+        let mut cur = len * i / count;
+        while file[cur] != b'\n' {
+            cur += 1;
+        }
+        cur + 1
+    });
+
+    let boundaries = std::iter::once(0)
+        .chain(boundaries)
+        .chain(std::iter::once(len));
+
+    boundaries
+        .clone()
+        .zip(boundaries.skip(1))
+        .map(|(b, e)| &file[b..e])
+        .collect()
 }
 
 fn handle_measurement<'a>(
@@ -72,24 +88,20 @@ struct Reader<'a> {
 
 impl<'a> Reader<'a> {
     fn new(slice: &'a [u8]) -> Self {
-        // TODO: fix
-        let offset = slice
-            .iter()
-            .enumerate()
-            .find(|(_, c)| **c == b'\n')
-            .map(|(i, _)| i)
-            .unwrap()
-            + 1;
-        Self { slice, offset }
+        Self { slice, offset: 0 }
     }
+}
+impl<'a> Iterator for Reader<'a> {
+    type Item = (&'a str, i64);
 
     fn next(&mut self) -> Option<(&'a str, i64)> {
+        if self.offset >= self.slice.len() {
+            return None;
+        }
+
         let name = {
             let name_start = self.offset;
             loop {
-                if self.offset >= self.slice.len() {
-                    return None;
-                }
                 if self.slice[self.offset] == b';' {
                     break &self.slice[name_start..self.offset];
                 }
@@ -101,9 +113,6 @@ impl<'a> Reader<'a> {
             let mut negative = false;
             let mut n = 0;
             loop {
-                if self.offset >= self.slice.len() {
-                    return None;
-                }
                 match self.slice[self.offset] {
                     b'-' => {
                         negative = true;
@@ -119,17 +128,22 @@ impl<'a> Reader<'a> {
                 }
                 self.offset += 1;
             }
+
             if negative {
-                n = -n;
+                -n
+            } else {
+                n
             }
-            n
         };
+        // We know the input is well formed utf8, don't bother checking and wasting time...
         let name = unsafe { std::str::from_utf8_unchecked(name) };
         Some((name, measurement))
     }
 }
 
 fn main() -> anyhow::Result<()> {
+    let begin_time = std::time::Instant::now();
+
     let map = memory_map("../1brc/measurements.txt")?;
     let chunks = split_map(&map, 24);
 
@@ -140,10 +154,11 @@ fn main() -> anyhow::Result<()> {
             handles.push(scope.spawn(move || {
                 let mut stations: HashMap<&str, (i64, i64, i64, i64)> = HashMap::new();
 
-                let mut reader = Reader::new(chunk);
-                while let Some((station, measure)) = reader.next() {
+                let reader = Reader::new(chunk);
+                for (station, measure) in reader {
                     handle_measurement(&mut stations, station, measure);
                 }
+
                 stations
             }));
         }
@@ -152,5 +167,10 @@ fn main() -> anyhow::Result<()> {
 
     let stations = join_maps(maps);
     print_result(&stations);
+
+    let end_time = std::time::Instant::now();
+    let elapsed = end_time - begin_time;
+
+    println!("elapsed seconds: {}", elapsed.as_secs_f32());
     Ok(())
 }
