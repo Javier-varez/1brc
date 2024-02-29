@@ -166,7 +166,7 @@ fn main() -> anyhow::Result<()> {
     let begin_time = std::time::Instant::now();
 
     let map = memory_map("../1brc/measurements.txt")?;
-    let chunks = split_map(&map, 24);
+    let chunks = split_map(&map, num_cpus::get());
 
     let maps = std::thread::scope(|scope| {
         let handles: Vec<_> = chunks
