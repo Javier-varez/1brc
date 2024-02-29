@@ -1,5 +1,6 @@
 use memmap2::Mmap;
 use std::collections::HashMap;
+use std::fmt::Display;
 
 fn memory_map(file: &str) -> anyhow::Result<memmap2::Mmap> {
     let file = std::fs::File::open(file)?;
@@ -43,22 +44,42 @@ fn handle_measurement<'a>(
     }
 }
 
-fn print_result(stations: &HashMap<&str, (i64, i64, i64, i64)>) {
+struct Float(i64);
+
+impl Display for Float {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let v = if self.0 < 0 { -self.0 } else { self.0 };
+        let neg = if self.0 < 0 { "-" } else { "" };
+        let i = v / 10;
+        let d = v % 10;
+        write!(f, "{}{}.{}", neg, i, d)
+    }
+}
+
+fn print_result(stations: HashMap<&str, (i64, i64, i64, i64)>) {
     let mut count = 0i64;
     let mut results = vec![];
-    for (s, (n, total, min, max)) in stations.iter() {
+    for (s, (n, total, min, max)) in stations.into_iter() {
         count += n;
-        let mean = total / n; // todo fix rounding
-        results.push((s, min, max, mean))
+        let mean = if total < 0 {
+            (total - n / 2) / n
+        } else {
+            (total + n / 2) / n
+        };
+        results.push((s, Float(min), Float(max), Float(mean)))
     }
 
     results.sort_by(|(k1, ..), (k2, ..)| k1.cmp(k2));
 
     print!("{{");
-    for (station, min, max, mean) in results {
-        print!("{station}={min}/{mean}/{max}, ");
+    for (i, (station, min, max, mean)) in results.into_iter().enumerate() {
+        if i != 0 {
+            print!(", ");
+        }
+        print!("{station}={min}/{mean}/{max}");
     }
     println!("}}");
+
     println!("n: {count}");
 }
 
@@ -118,7 +139,7 @@ impl<'a> Iterator for Reader<'a> {
                         negative = true;
                     }
                     b'0'..=b'9' => {
-                        n += n * 10 + (self.slice[self.offset] - b'0') as i64;
+                        n = n * 10 + (self.slice[self.offset] - b'0') as i64;
                     }
                     b'\n' => {
                         self.offset += 1;
@@ -148,25 +169,27 @@ fn main() -> anyhow::Result<()> {
     let chunks = split_map(&map, 24);
 
     let maps = std::thread::scope(|scope| {
-        let mut handles = vec![];
-        for chunk in chunks {
-            let chunk = chunk;
-            handles.push(scope.spawn(move || {
-                let mut stations: HashMap<&str, (i64, i64, i64, i64)> = HashMap::new();
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                scope.spawn(|| {
+                    let mut stations: HashMap<&str, (i64, i64, i64, i64)> = HashMap::new();
 
-                let reader = Reader::new(chunk);
-                for (station, measure) in reader {
-                    handle_measurement(&mut stations, station, measure);
-                }
+                    let reader = Reader::new(chunk);
+                    for (station, measure) in reader {
+                        handle_measurement(&mut stations, station, measure);
+                    }
 
-                stations
-            }));
-        }
+                    stations
+                })
+            })
+            .collect();
+
         handles.into_iter().map(|r| r.join().unwrap()).collect()
     });
 
     let stations = join_maps(maps);
-    print_result(&stations);
+    print_result(stations);
 
     let end_time = std::time::Instant::now();
     let elapsed = end_time - begin_time;
