@@ -165,7 +165,10 @@ impl<'a> Iterator for Reader<'a> {
 fn main() -> anyhow::Result<()> {
     let begin_time = std::time::Instant::now();
 
-    let map = memory_map("../1brc/measurements.txt")?;
+    let file = std::env::args().skip(1).next().ok_or(anyhow::anyhow!(
+        "Please provide the path to the input file as an argument"
+    ))?;
+    let map = memory_map(&file)?;
     let chunks = split_map(&map, num_cpus::get());
 
     let maps = std::thread::scope(|scope| {
