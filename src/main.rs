@@ -104,52 +104,58 @@ fn join_maps(
 
 struct Reader<'a> {
     slice: &'a [u8],
-    offset: usize,
 }
 
 impl<'a> Reader<'a> {
     fn new(slice: &'a [u8]) -> Self {
-        Self { slice, offset: 0 }
+        Self { slice }
     }
 }
 impl<'a> Iterator for Reader<'a> {
     type Item = (&'a str, i64);
 
     fn next(&mut self) -> Option<(&'a str, i64)> {
-        if self.offset >= self.slice.len() {
+        if self.slice.is_empty() {
             return None;
         }
 
         let name = {
-            let name_start = self.offset;
-            loop {
-                if self.slice[self.offset] == b';' {
-                    break &self.slice[name_start..self.offset];
-                }
-                self.offset += 1;
-            }
+            let count = unsafe {
+                self.slice
+                    .iter()
+                    .enumerate()
+                    .find(|(_, c)| **c == b';')
+                    .map(|(i, _)| i)
+                    .unwrap_unchecked()
+            };
+            let res = &self.slice[..count];
+            self.slice = &self.slice[count..];
+            res
         };
 
         let measurement = {
             let mut negative = false;
             let mut n = 0;
-            loop {
-                match self.slice[self.offset] {
-                    b'-' => {
-                        negative = true;
-                    }
-                    b'0'..=b'9' => {
-                        n = n * 10 + (self.slice[self.offset] - b'0') as i64;
-                    }
-                    b'\n' => {
-                        self.offset += 1;
-                        break;
-                    }
-                    _ => {}
-                }
-                self.offset += 1;
-            }
 
+            let mut skip = 0;
+
+            self.slice
+                .iter()
+                .take_while(|c| **c != b'\n')
+                .for_each(|c| {
+                    match *c {
+                        b'-' => {
+                            negative = true;
+                        }
+                        b'0'..=b'9' => {
+                            n = n * 10 + (*c - b'0') as i64;
+                        }
+                        _ => {}
+                    }
+                    skip += 1;
+                });
+
+            self.slice = &self.slice[skip + 1..];
             if negative {
                 -n
             } else {
