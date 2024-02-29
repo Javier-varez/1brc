@@ -9,3 +9,6 @@ debug = true
 
 [dependencies]
 anyhow = "1.0"
+crossbeam = "0.8"
+heapless = "0.8"
+memmap2= "0.9"
