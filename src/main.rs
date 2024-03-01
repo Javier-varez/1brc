@@ -1,6 +1,64 @@
 use memmap2::Mmap;
-use std::collections::HashMap;
 use std::fmt::Display;
+
+#[derive(Clone)]
+struct Entry<'a> {
+    k: &'a str,
+    v: (i64, i64, i64, i64),
+}
+
+struct HashMap<'a> {
+    entries: Vec<Vec<Entry<'a>>>,
+}
+
+impl<'a> HashMap<'a> {
+    const CAP: usize = 256 * 1024;
+    fn new() -> Self {
+        Self {
+            entries: vec![vec![]; Self::CAP],
+        }
+    }
+
+    fn join(&mut self, other: Self) {
+        for (s, o) in self.entries.iter_mut().zip(other.entries.into_iter()) {
+            for oe in o {
+                if let Some(se) = s.iter_mut().find(|e| e.k == oe.k) {
+                    let (n, total, min, max) = &mut (se.v);
+                    *n += oe.v.0;
+                    *total += oe.v.1;
+                    *min = oe.v.2.min(*min);
+                    *max = oe.v.3.max(*max);
+                } else {
+                    s.push(oe);
+                }
+            }
+        }
+    }
+
+    // Hash is calculated externally to avoid iterating through the key again, if possible
+    fn update(&mut self, hash: usize, k: &'a str, measure: i64) {
+        let pos = hash % Self::CAP;
+        if let Some(e) = self.entries[pos].iter_mut().find(|e| e.k == k) {
+            let (n, total, min, max) = &mut (e.v);
+            *n += 1;
+            *total += measure;
+            *min = measure.min(*min);
+            *max = measure.max(*max);
+        } else {
+            self.entries[pos].push(Entry {
+                k,
+                v: (1, measure, measure, measure),
+            });
+        }
+    }
+
+    fn into_iter(self) -> impl Iterator<Item = (&'a str, (i64, i64, i64, i64))> {
+        self.entries
+            .into_iter()
+            .map(|e| e.into_iter().map(|e| (e.k, e.v)))
+            .flatten()
+    }
+}
 
 fn memory_map(file: &str) -> anyhow::Result<memmap2::Mmap> {
     let file = std::fs::File::open(file)?;
@@ -29,21 +87,6 @@ fn split_map(file: &Mmap, count: usize) -> Vec<&[u8]> {
         .collect()
 }
 
-fn handle_measurement<'a>(
-    stations: &mut HashMap<&'a str, (i64, i64, i64, i64)>,
-    station: &'a str,
-    measure: i64,
-) {
-    if let Some((n, total, min, max)) = stations.get_mut(station) {
-        *n += 1;
-        *total += measure;
-        *min = measure.min(*min);
-        *max = measure.max(*max);
-    } else {
-        stations.insert(station, (1, measure, measure, measure));
-    }
-}
-
 struct Float(i64);
 
 impl Display for Float {
@@ -56,7 +99,7 @@ impl Display for Float {
     }
 }
 
-fn print_result(stations: HashMap<&str, (i64, i64, i64, i64)>) {
+fn print_result(stations: HashMap) {
     let mut count = 0i64;
     let mut results = vec![];
     for (s, (n, total, min, max)) in stations.into_iter() {
@@ -83,21 +126,10 @@ fn print_result(stations: HashMap<&str, (i64, i64, i64, i64)>) {
     println!("n: {count}");
 }
 
-fn join_maps(
-    maps: Vec<HashMap<&str, (i64, i64, i64, i64)>>,
-) -> HashMap<&str, (i64, i64, i64, i64)> {
+fn join_maps(maps: Vec<HashMap>) -> HashMap {
     let mut complete = HashMap::new();
     for map in maps {
-        for (k, (a, b, c, d)) in map.into_iter() {
-            if let Some((a2, b2, c2, d2)) = complete.get_mut(k) {
-                *a2 += a;
-                *b2 += b;
-                *c2 = c.min(*c2);
-                *d2 = d.max(*d2);
-            } else {
-                complete.insert(k, (a, b, c, d));
-            }
-        }
+        complete.join(map);
     }
     complete
 }
@@ -112,25 +144,24 @@ impl<'a> Reader<'a> {
     }
 }
 impl<'a> Iterator for Reader<'a> {
-    type Item = (&'a str, i64);
+    type Item = (usize, &'a str, i64);
 
-    fn next(&mut self) -> Option<(&'a str, i64)> {
+    fn next(&mut self) -> Option<(usize, &'a str, i64)> {
         if self.slice.is_empty() {
             return None;
         }
 
-        let name = {
-            let count = unsafe {
-                self.slice
-                    .iter()
-                    .enumerate()
-                    .find(|(_, c)| **c == b';')
-                    .map(|(i, _)| i)
-                    .unwrap_unchecked()
-            };
-            let res = &self.slice[..count];
+        let (hash, name) = {
+            let mut count = 0;
+            let mut hash = 0usize;
+            self.slice.iter().take_while(|c| **c != b';').for_each(|c| {
+                hash ^= (*c as usize) << (count % 8);
+                count += 1;
+            });
+            // We know the input is well formed utf8, don't bother checking and wasting time...
+            let name = unsafe { std::str::from_utf8_unchecked(&self.slice[..count]) };
             self.slice = &self.slice[count..];
-            res
+            (hash, name)
         };
 
         let measurement = {
@@ -138,7 +169,6 @@ impl<'a> Iterator for Reader<'a> {
             let mut n = 0;
 
             let mut skip = 0;
-
             self.slice
                 .iter()
                 .take_while(|c| **c != b'\n')
@@ -162,9 +192,8 @@ impl<'a> Iterator for Reader<'a> {
                 n
             }
         };
-        // We know the input is well formed utf8, don't bother checking and wasting time...
-        let name = unsafe { std::str::from_utf8_unchecked(name) };
-        Some((name, measurement))
+
+        Some((hash, name, measurement))
     }
 }
 
@@ -177,16 +206,16 @@ fn main() -> anyhow::Result<()> {
     let map = memory_map(&file)?;
     let chunks = split_map(&map, num_cpus::get());
 
-    let maps = std::thread::scope(|scope| {
+    let maps: Vec<HashMap> = std::thread::scope(|scope| {
         let handles: Vec<_> = chunks
             .into_iter()
             .map(|chunk| {
                 scope.spawn(|| {
-                    let mut stations: HashMap<&str, (i64, i64, i64, i64)> = HashMap::new();
+                    let mut stations: HashMap = HashMap::new();
 
                     let reader = Reader::new(chunk);
-                    for (station, measure) in reader {
-                        handle_measurement(&mut stations, station, measure);
+                    for (hash, station, measure) in reader {
+                        stations.update(hash, station, measure);
                     }
 
                     stations
@@ -197,6 +226,8 @@ fn main() -> anyhow::Result<()> {
         handles.into_iter().map(|r| r.join().unwrap()).collect()
     });
 
+    let mid_time = std::time::Instant::now();
+
     let stations = join_maps(maps);
     print_result(stations);
 
@@ -204,5 +235,7 @@ fn main() -> anyhow::Result<()> {
     let elapsed = end_time - begin_time;
 
     println!("elapsed seconds: {}", elapsed.as_secs_f32());
+    println!("par time : {}", (mid_time - begin_time).as_secs_f32());
+    println!("serial time : {}", (end_time - mid_time).as_secs_f32());
     Ok(())
 }
