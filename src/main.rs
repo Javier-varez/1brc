@@ -138,11 +138,26 @@ fn join_maps(maps: Vec<HashMap>) -> HashMap {
 
 struct Reader<'a> {
     slice: &'a [u8],
+    len: usize,
 }
 
 impl<'a> Reader<'a> {
     fn new(slice: &'a [u8]) -> Self {
-        Self { slice }
+        Self {
+            slice,
+            len: slice.len(),
+        }
+    }
+
+    fn advance(&mut self, count: usize) -> &'a [u8] {
+        unsafe {
+            let base = self.slice.as_ptr();
+            let part = &*std::ptr::slice_from_raw_parts(base, count);
+            self.slice =
+                &*std::ptr::slice_from_raw_parts(base.add(count + 1), self.len - count - 1);
+            self.len -= count + 1;
+            part
+        }
     }
 }
 impl<'a> Iterator for Reader<'a> {
@@ -160,8 +175,7 @@ impl<'a> Iterator for Reader<'a> {
                 hash ^= (*c as usize) << (count % 64);
                 count += 1;
             });
-            let name = &self.slice[..count];
-            self.slice = &self.slice[count + 1..];
+            let name = self.advance(count);
             (hash, name)
         };
 
@@ -180,7 +194,7 @@ impl<'a> Iterator for Reader<'a> {
                 count += 1;
             });
 
-            self.slice = &self.slice[count + 1..];
+            self.advance(count);
             if negative {
                 -n
             } else {
