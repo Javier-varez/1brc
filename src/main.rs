@@ -190,36 +190,51 @@ impl<'a> Iterator for Reader<'a> {
     }
 }
 
+const NUM_CHUNKS: usize = 48;
+
 fn main() -> anyhow::Result<()> {
+    let begin_time = std::time::Instant::now();
     let file = std::env::args().skip(1).next().ok_or(anyhow::anyhow!(
         "Please provide the path to the input file as an argument"
     ))?;
     let map = memory_map(&file)?;
-    let chunks = split_map(&map, num_cpus::get() * 4);
+    let chunks = split_map(&map, NUM_CHUNKS);
 
-    let maps: std::thread::Result<Vec<HashMap>> = std::thread::scope(|scope| {
+    let maps: Vec<HashMap> = std::thread::scope(|scope| {
         let handles: Vec<_> = chunks
+            .chunks(chunks.len() / num_cpus::get())
             .into_iter()
-            .map(|chunk| {
+            .map(|chunks| {
                 scope.spawn(|| {
-                    let mut stations: HashMap = HashMap::new();
+                    chunks
+                        .into_iter()
+                        .map(|chunk| {
+                            let mut stations: HashMap = HashMap::new();
 
-                    let reader = Reader::new(chunk);
-                    for (hash, station, measure) in reader {
-                        stations.update(hash, station, measure);
-                    }
+                            let reader = Reader::new(chunk);
+                            for (hash, station, measure) in reader {
+                                stations.update(hash, station, measure);
+                            }
 
-                    stations
+                            stations
+                        })
+                        .collect::<Vec<_>>()
                 })
             })
             .collect();
 
-        handles.into_iter().map(|r| r.join()).collect()
+        handles
+            .into_iter()
+            .map(|r| r.join().unwrap())
+            .flatten()
+            .collect()
     });
-    let maps = maps.expect("Not all threads completed successfully");
 
     let stations = join_maps(maps);
     print_result(stations)?;
+
+    let end_time = std::time::Instant::now();
+    println!("elapsed: {}", (end_time - begin_time).as_secs_f64());
 
     Ok(())
 }
